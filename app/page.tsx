@@ -1,47 +1,52 @@
+'use client'
+
+import { useEffect, useMemo, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import songs from '@/data/songs.json'
+import { Search, Shuffle, Trash2, Plus, Play, SkipBack, SkipForward, LogOut, Music2, ListMusic, Layers3 } from 'lucide-react'
+
+type Song = { id: string; title: string; artist: string; genre: string; youtubeVideoId?: string; video_id?: string; thumbnail?: string }
+type SearchResult = { title: string; videoId: string; thumbnail: string }
+
 export default function Page() {
-  return (
-    <main
-      style={{
-        colorScheme: 'light dark',
-        position: 'relative',
-        display: 'flex',
-        minHeight: '100vh',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'light-dark(#fff, #000)',
-        color: 'light-dark(#000, #fff)',
-      }}
-    >
-      <svg
-        aria-hidden="true"
-        style={{ width: 80, height: 80 }}
-        width={80}
-        height={80}
-        fill="none"
-        viewBox="0 0 20 20"
-        xmlns="http://www.w3.org/2000/svg"
-        stroke="currentColor"
-        strokeWidth="0.5"
-      >
-        <path
-          d="M14.2 14.2H17V6.9375C17 4.76288 15.2371 3 13.0625 3H5.8V5.8M14.2 14.2V7.79063L7.79062 14.2H14.2ZM14.2 14.2V17H6.9375C4.76288 17 3 15.2371 3 13.0625V5.8H5.8M5.8 5.8V12.2313L12.2313 5.8H5.8Z"
-          strokeLinejoin="round"
-        />
-      </svg>
-      <p
-        style={{
-          position: 'absolute',
-          left: '50%',
-          top: 'calc(50% + 56px)',
-          transform: 'translateX(-50%)',
-          whiteSpace: 'nowrap',
-          fontSize: '14px',
-          fontWeight: 500,
-          color: 'light-dark(#71717a, #a1a1aa)',
-        }}
-      >
-        Your v0 generation will show here.
-      </p>
-    </main>
-  )
+  const supabase = typeof window !== 'undefined' ? createClient() : (null as any)
+  const [user, setUser] = useState<{ id: string; email?: string } | null>(null)
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [authMessage, setAuthMessage] = useState('')
+  const [playlist, setPlaylist] = useState<Song[]>([])
+  const [history, setHistory] = useState<Song[]>([])
+  const [query, setQuery] = useState('')
+  const [youtubeResults, setYoutubeResults] = useState<SearchResult[]>([])
+  const [searchMessage, setSearchMessage] = useState('')
+  const [current, setCurrent] = useState<Song | null>(null)
+
+  useEffect(() => { supabase.auth.getUser().then(({ data }) => setUser(data.user)); const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null)); return () => listener.subscription.unsubscribe() }, [])
+  useEffect(() => { if (!user) return; supabase.from('playlist_items').select('position,songs(*)').eq('user_id', user.id).order('position').then(({ data }) => setPlaylist((data ?? []).map((row: any) => row.songs).filter(Boolean))); }, [user])
+
+  async function authenticate(event: React.FormEvent) {
+    event.preventDefault(); setAuthMessage('')
+    const result = authMode === 'signin' ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/auth/callback` } })
+    if (result.error) setAuthMessage(result.error.message.toLowerCase().includes('confirm') ? 'Check your email to confirm your account.' : 'Invalid email or password.')
+    else if (authMode === 'signup' && !result.data.session) setAuthMessage('Check your email to confirm your account.')
+  }
+  async function addSong(song: Song) {
+    if (!user) return
+    const { data: saved } = await supabase.from('songs').upsert({ user_id: user.id, video_id: song.youtubeVideoId || song.video_id || '', title: song.title, thumbnail: song.thumbnail || '' }, { onConflict: 'user_id,video_id' }).select().single()
+    if (!saved) return
+    const { count } = await supabase.from('playlist_items').select('*', { count: 'exact', head: true }).eq('user_id', user.id)
+    await supabase.from('playlist_items').insert({ user_id: user.id, song_id: saved.id, position: count ?? 0 })
+    setPlaylist((items) => [...items, { ...song, id: saved.id, video_id: saved.video_id }]); setCurrent(song)
+  }
+  async function removeSong(song: Song) { if (!user) return; const index = playlist.findIndex((item) => item.id === song.id); await supabase.from('playlist_items').delete().eq('user_id', user.id).eq('song_id', song.id); const rest = playlist.filter((item) => item.id !== song.id); for (const [position, item] of rest.entries()) await supabase.from('playlist_items').update({ position }).eq('user_id', user.id).eq('song_id', item.id); setPlaylist(rest); if (index === 0) setCurrent(rest[0] ?? null) }
+  async function playNext() { if (!playlist.length || !user) return; const [next, ...rest] = playlist; await removeSong(next); await supabase.from('play_history').insert({ user_id: user.id, song_id: next.id }); setHistory((items) => [next, ...items]); setCurrent(next); setPlaylist(rest) }
+  async function playPrevious() { const [previous, ...rest] = history; if (!previous) return; setHistory(rest); setCurrent(previous); setPlaylist((items) => [previous, ...items]) }
+  function shuffle() { setPlaylist((items) => [...items].sort(() => Math.random() - 0.5)) }
+  async function youtubeSearch() { setSearchMessage(''); const response = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`); const data = await response.json(); setYoutubeResults(data.results ?? []); setSearchMessage(data.message ?? '') }
+  const localResults = useMemo(() => (songs as Song[]).filter((song) => `${song.title} ${song.artist}`.toLowerCase().includes(query.toLowerCase())), [query])
+
+  if (!user) return <main className="min-h-screen bg-[#09090b] px-6 py-12 text-zinc-100"><div className="mx-auto flex max-w-md flex-col gap-8 pt-12"><div><div className="mb-5 flex items-center gap-3 text-amber-300"><Music2 /> <span className="font-semibold tracking-[0.2em] uppercase">PlayWave</span></div><h1 className="text-5xl font-semibold tracking-tight">Your music, <span className="text-amber-300">in motion.</span></h1><p className="mt-4 text-zinc-400">A playlist engine inspired by the data structures behind your favorite songs.</p></div><form onSubmit={authenticate} className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/[0.04] p-6"><h2 className="text-xl font-medium">{authMode === 'signin' ? 'Welcome back' : 'Create your account'}</h2><input required type="email" placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 outline-none focus:border-amber-300" /><input required minLength={6} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 outline-none focus:border-amber-300" /><button className="rounded-xl bg-amber-300 px-4 py-3 font-semibold text-black">{authMode === 'signin' ? 'Sign in' : 'Sign up'}</button>{authMessage && <p className="text-sm text-amber-200">{authMessage}</p>}<button type="button" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="text-sm text-zinc-400 underline">{authMode === 'signin' ? 'New here? Create an account' : 'Already have an account? Sign in'}</button></form></div></main>
+
+  return <main className="min-h-screen bg-[#09090b] pb-28 text-zinc-100"><header className="flex items-center justify-between border-b border-white/10 px-6 py-5"><div className="flex items-center gap-3"><div className="rounded-xl bg-amber-300 p-2 text-black"><Music2 /></div><div><div className="font-semibold tracking-[0.15em] uppercase">PlayWave</div><div className="text-xs text-zinc-500">Personal music workspace</div></div></div><button onClick={() => supabase.auth.signOut()} className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white"><LogOut /> Sign out</button></header><div className="mx-auto grid max-w-7xl gap-6 px-6 py-8 lg:grid-cols-[1fr_340px]"><section className="flex flex-col gap-6"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm text-amber-300">YOUR LIBRARY</p><h1 className="mt-1 text-4xl font-semibold">Playlist <span className="text-zinc-500">/ {playlist.length} tracks</span></h1></div><div className="flex gap-2"><button onClick={shuffle} className="flex items-center gap-2 rounded-xl border border-white/10 px-4 py-2 text-sm hover:bg-white/10"><Shuffle /> Shuffle</button></div></div><div className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.04]">{playlist.length === 0 ? <div className="flex flex-col items-center gap-3 px-6 py-20 text-center"><ListMusic className="text-zinc-600" size={40} /><h2 className="text-xl">Your playlist is empty</h2><p className="text-sm text-zinc-500">Search the local database or YouTube to add your first track.</p></div> : playlist.map((song, index) => <div key={song.id} className="group flex items-center gap-4 border-b border-white/5 px-5 py-4 last:border-0"><span className="w-5 text-sm text-zinc-600">{String(index + 1).padStart(2, '0')}</span><button onClick={() => setCurrent(song)} className="flex min-w-0 flex-1 items-center gap-3 text-left"><div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-300/10 text-amber-300"><Play /></div><div className="min-w-0"><p className="truncate font-medium">{song.title}</p><p className="truncate text-sm text-zinc-500">{song.artist} · {song.genre}</p></div></button><button onClick={() => removeSong(song)} aria-label={`Delete ${song.title}`} className="text-zinc-600 opacity-0 transition group-hover:opacity-100 hover:text-red-300"><Trash2 /></button></div>)}</div><div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5"><div className="mb-4 flex items-center gap-2"><Layers3 className="text-amber-300" /><h2 className="font-medium">Data structure visualizer</h2></div><div className="grid gap-5 text-sm md:grid-cols-2"><div><p className="mb-2 text-xs uppercase tracking-widest text-zinc-500">Linked list · playlist</p><div className="flex flex-wrap items-center gap-2 text-amber-200">{playlist.map((song, i) => <span key={song.id} className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-2 py-1">{song.title.slice(0, 12)}{i < playlist.length - 1 ? ' →' : ''}</span>)}<span className="text-zinc-600">NULL</span></div></div><div><p className="mb-2 text-xs uppercase tracking-widest text-zinc-500">Stack · play history</p><div className="flex flex-col gap-1">{history.slice(0, 4).map((song, i) => <span key={`${song.id}-${i}`} className="rounded-lg border border-white/10 px-2 py-1">{i === 0 ? 'TOP · ' : ''}{song.title}</span>)}{!history.length && <span className="text-zinc-600">Stack is empty</span>}</div></div></div></div></section><aside className="flex flex-col gap-6"><div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5"><h2 className="mb-4 text-xl font-medium">Add a song</h2><div className="flex gap-2"><input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) youtubeSearch() }} placeholder="Search songs or YouTube" className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 outline-none focus:border-amber-300" /><button onClick={youtubeSearch} className="rounded-xl bg-amber-300 px-3 text-black"><Search /></button></div><div className="mt-4 flex flex-col gap-2">{localResults.slice(0, 5).map((song) => <button key={song.id} onClick={() => addSong(song)} className="flex items-center justify-between rounded-xl px-3 py-2 text-left hover:bg-white/10"><span className="min-w-0"><span className="block truncate text-sm">{song.title}</span><span className="block text-xs text-zinc-500">{song.artist}</span></span><Plus className="text-amber-300" /></button>)}{youtubeResults.map((result) => <button key={result.videoId} onClick={() => addSong({ id: result.videoId, title: result.title, artist: 'YouTube', genre: 'Video', youtubeVideoId: result.videoId, thumbnail: result.thumbnail })} className="flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/10"><img src={result.thumbnail} alt="" className="size-10 rounded object-cover" /><span className="min-w-0 flex-1 truncate text-sm">{result.title}</span><Plus className="text-amber-300" /></button>)}{searchMessage && <p className="mt-2 text-xs text-amber-200">{searchMessage}</p>}</div></div></aside></div><footer className="fixed inset-x-0 bottom-0 border-t border-white/10 bg-[#111113]/95 px-6 py-3 backdrop-blur"><div className="mx-auto flex max-w-7xl items-center justify-between gap-4"><div className="flex min-w-0 items-center gap-3"><div className="rounded-lg bg-amber-300/10 p-2 text-amber-300"><Music2 /></div><div className="min-w-0"><p className="truncate font-medium">{current?.title ?? 'Nothing playing'}</p><p className="truncate text-xs text-zinc-500">{current?.artist ?? 'Choose a track from your playlist'}</p></div></div><div className="flex items-center gap-2"><button onClick={playPrevious} aria-label="Play previous" className="rounded-full p-2 hover:bg-white/10"><SkipBack /></button><button onClick={playNext} aria-label="Play next" className="rounded-full bg-amber-300 p-3 text-black"><SkipForward /></button></div></div></footer></main>
 }
