@@ -22,14 +22,35 @@ export default function Page() {
   const [searchMessage, setSearchMessage] = useState('')
   const [current, setCurrent] = useState<Song | null>(null)
 
-  useEffect(() => { supabase.auth.getUser().then(({ data }) => setUser(data.user)); const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null)); return () => listener.subscription.unsubscribe() }, [])
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUser(data.user))
+    const callbackError = new URLSearchParams(window.location.search).get('auth_error')
+    if (callbackError) {
+      setAuthMessage(callbackError)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null))
+    return () => listener.subscription.unsubscribe()
+  }, [])
   useEffect(() => { if (!user) return; supabase.from('playlist_items').select('position,songs(*)').eq('user_id', user.id).order('position').then(({ data }) => setPlaylist((data ?? []).map((row: any) => row.songs).filter(Boolean))); }, [user])
 
   async function authenticate(event: React.FormEvent) {
     event.preventDefault(); setAuthMessage('')
     const result = authMode === 'signin' ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/auth/callback` } })
-    if (result.error) setAuthMessage(result.error.message.toLowerCase().includes('confirm') ? 'Check your email to confirm your account.' : 'Invalid email or password.')
-    else if (authMode === 'signup' && !result.data.session) setAuthMessage('Check your email to confirm your account.')
+    if (result.error) {
+      const code = result.error.code?.toLowerCase() ?? ''
+      const message = result.error.message.toLowerCase()
+      if (authMode === 'signup') {
+        if (code.includes('email_address_invalid') || message.includes('invalid email')) setAuthMessage('Enter a valid email address.')
+        else if (code.includes('weak_password') || message.includes('password')) setAuthMessage('Use a stronger password with at least 6 characters.')
+        else if (code.includes('rate_limit') || message.includes('rate limit') || message.includes('too many')) setAuthMessage('Email delivery is temporarily limited. Please wait a while and try again.')
+        else if (code.includes('not_authorized') || message.includes('not authorized')) setAuthMessage('This Supabase project can only send confirmation emails to approved addresses. Try an approved email or configure SMTP.')
+        else if (message.includes('already registered') || message.includes('already been registered')) setAuthMessage('That email is already registered. Try signing in instead.')
+        else setAuthMessage('We could not create your account. Check your details and try again.')
+      } else {
+        setAuthMessage(message.includes('confirm') || code.includes('not_confirmed') ? 'Confirm your email before signing in.' : 'Invalid email or password.')
+      }
+    } else if (authMode === 'signup' && !result.data.session) setAuthMessage('Account created. Check your email and click the confirmation link before signing in.')
   }
   async function addSong(song: Song) {
     if (!user) return
